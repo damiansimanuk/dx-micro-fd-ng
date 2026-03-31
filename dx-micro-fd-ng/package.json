@@ -22,6 +22,7 @@
     "echarts": "^6.0.0",
     "es-module-shims": "^1.5.12",
     "ngx-echarts": "^21.0.0",
+    "rpc-websockets": "^9.3.7",
     "rxjs": "~7.8.0",
     "tslib": "^2.3.0"
   },

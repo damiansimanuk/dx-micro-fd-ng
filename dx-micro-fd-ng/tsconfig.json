@@ -6,7 +6,9 @@
     "paths": {
       "common": ["./dist/common"]
     },
-    "strict": true,
+    "strict": true, 
+    "moduleResolution": "node",
+    "esModuleInterop": true,   
     "noImplicitOverride": true,
     "noPropertyAccessFromIndexSignature": true,
     "noImplicitReturns": true,
