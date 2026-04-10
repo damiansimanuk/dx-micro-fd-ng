@@ -1,24 +1,55 @@
 
-import { Client } from "rpc-websockets";
-import { BehaviorSubject, filter, finalize, Subject } from "rxjs";
+import { BehaviorSubject, finalize, map, Observable, Subject } from "rxjs";
+import { Client, type IWSClientAdditionalOptions, type NodeWebSocketTypeOptions } from "rpc-websockets";
 import type { EventDto, IConnectionResolver } from "./proxy-factory";
 
 
+if (typeof window == "undefined") {
+  (globalThis as any).sessionStorage = null!
+}
+
 export class ProxyWebsocket implements IConnectionResolver {
-  #client: Client;
-  #events: Map<string, BehaviorSubject<EventDto>> = new Map();
-  #isConnected$ = new Subject<boolean>();
+  #client!: Client;
+  #events: Map<string, Subject<EventDto>> = new Map();
+  #isConnected$ = new BehaviorSubject<boolean>(false);
+  #currentUser$ = new BehaviorSubject<{ username: string, token: string } | null>(null);
 
   get IsConnected() {
     return this.#isConnected$.asObservable()
   }
 
-  constructor(url: string) {
-    this.#client = new Client(url, {
-      autoconnect: true, headers: {
+  get UserChanged() {
+    return this.#currentUser$.asObservable()
+  }
+
+  get CurrentUser() {
+    return this.#currentUser$.value
+  }
+
+  constructor(
+    public url: string,
+    public config?: IWSClientAdditionalOptions & NodeWebSocketTypeOptions
+  ) {
+    this.reconnect(config)
+  }
+
+  public reconnect(config?: IWSClientAdditionalOptions & NodeWebSocketTypeOptions) {
+    if (this.#client != null) {
+      this.#isConnected$.next(false)
+      this.#client.off('close');
+      this.#client.off('open');
+      this.#client.off('event.notification');
+      this.#client.close()
+    }
+
+    this.#client = new Client(this.url, {
+      autoconnect: true,
+      headers: {
         AUTORIZATION: "Bearer qwrwqerewr"
-      }
+      },
+      ...config,
     });
+
     this.#client.on('close', this.onClose.bind(this));
     this.#client.on('open', this.onOpen.bind(this));
     this.#client.on('event.notification', this.OnEvent.bind(this));
@@ -31,44 +62,86 @@ export class ProxyWebsocket implements IConnectionResolver {
   }
 
   public subscribe(proxyName: string, objectId: string | undefined, eventName: string) {
-    var eventKey = `${objectId}_${eventName}`
+    let eventKey = `${objectId}_${eventName}`
 
-    // send request to server
-    if (!this.#events.has(eventKey)) {
-      const s = new BehaviorSubject<EventDto>(null!);
-      this.#events.set(eventKey, s);
-      this.#client.call("subscribe", { proxyName, objectId, eventName });
+    let subject = this.#events.get(eventKey);
+    if (subject == null) {
+      subject = new Subject<EventDto>()
+      this.#events.set(eventKey, subject);
     }
 
-    const subject = this.#events.get(eventKey)!;
+    this.#client.call("subscribe", { proxyName, objectId, eventName }).catch();
 
     return subject.pipe(
-      filter(val => val !== null),
       finalize(() => {
-        // clean subscriptions
         if (!subject.observed) {
-          console.log(`Limpiando suscripción para: ${eventKey}`);
-          this.#client.call("unsubscribe", { proxyName, objectId, eventName });
-          this.#events.delete(eventKey);
+          setTimeout(() => this.safeUnsubscribe(proxyName, objectId, eventName), 2000);
         }
       })
     )
   }
 
-  private async onClose() {
-    console.debug("************** event ws on close:");
+  public signin(user: string, password: string | null) {
+    var args = password != null
+      ? [user, password]
+      : [user]
+
+    return this.#client
+      .call("signin", { args })
+      .then((r: any) => {
+        console.log("signin", r)
+        sessionStorage?.setItem("token", r.Item2)
+        this.#currentUser$.next({ username: r.Item1, token: r.Item2 });
+        return this.#currentUser$.value
+      })
+      .catch(e => {
+        console.error("signin *****", e.message)
+        this.#currentUser$.next(null)
+        return null
+      })
+  }
+
+  public signout() {
+    return this.#client
+      .call("signout", {})
+      .catch()
+      .finally(() => {
+        console.log("signout")
+        sessionStorage?.removeItem("token")
+        this.#currentUser$.next(null)
+      })
+  }
+
+  private safeUnsubscribe(proxyName: string, objectId: string | undefined, eventName: string) {
+    let eventKey = `${objectId}_${eventName}`
+    let subject = this.#events.get(eventKey);
+
+    if (subject != null && !subject.observed) {
+      console.log(`Limpiando suscripción para: ${eventKey}`);
+      this.#events.delete(eventKey);
+      if (this.#isConnected$.value)
+        this.#client.call("unsubscribe", { proxyName, objectId, eventName });
+    }
+  }
+
+  private onClose() {
+    console.debug("************** event ws on close");
     this.#isConnected$.next(false)
   }
 
-  private async onOpen(result: unknown) {
-    console.debug("************** event ws on open:", result);
+  private onOpen() {
+    console.debug("************** event ws on open");
     this.#isConnected$.next(true)
+    var token = sessionStorage?.getItem("token")
+    console.log("Try connect token", token)
+    if (token != null) {
+      this.signin(token, null)
+    }
   }
 
-  private OnEvent(message: EventDto) { 
+  private OnEvent(message: EventDto) {
     var eventKey = `${message.ObjectId}_${message.EventName}`
     this.#events.get(eventKey)?.next(message)
   }
-
 }
 
